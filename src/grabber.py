@@ -6,6 +6,8 @@ import urllib
 import os
 import pandas as pd
 import re
+# import dask.array as da
+import gc
 import rioxarray
 from tqdm import tqdm
 import tempfile
@@ -39,7 +41,6 @@ def set_empty_nc(day):
         clipped['unknown'].data = np.nan_to_num(clipped['unknown'].data)
         return clipped, clipped
 
-
 def create_sunrise(day_mrms):
     longitude = day_mrms['longitude'].data
     latitude = day_mrms['latitude'].data
@@ -59,9 +60,19 @@ def create_sunrise(day_mrms):
 
 
 
-def grabber(day):
+def grabber(day, clean=True):
     shapefile = read_shapefile()
     day_mrms, light_mrms = set_empty_nc(day)
+    # save to netcdf
+    day_mrms.to_netcdf(f'data/mrms/{str(day)}.nc')
+    # if clean is true, delete the light data
+    if clean:
+        if os.path.exists(f'data/sunshine/{str(day)}.nc'):
+            os.remove(f'data/sunshine/{str(day)}.nc')
+    # if existing, load light data
+    if os.path.exists(f'data/sunshine/{str(day)}.nc'):
+        light_mrms = xr.load_dataset(f'data/sunshine/{str(day)}.nc')
+
     sunrise_mrms, sunset_mrms = create_sunrise(day_mrms)
 
     main_URL = f'https://mtarchive.geol.iastate.edu/{str(day.year)}/{str("{:02d}".format(day.month))}/{str("{:02d}".format(day.day))}/mrms/ncep/PrecipRate/'
@@ -78,14 +89,52 @@ def grabber(day):
             xx.rio.write_crs("epsg:4326", inplace=True)
             clipped = xx.rio.clip(shapefile.geometry.apply(mapping), shapefile.crs, drop=True)
             clipped['unknown'].data[np.isnan(clipped['unknown'].data)] = 0
+            # load day_mrms
+            day_mrms = xr.open_dataset(f'data/mrms/{str(day)}.nc')
             # Concatenate daily precipitation
             day_mrms['unknown'].data = np.add(np.nan_to_num(clipped['unknown'].data), day_mrms['unknown'].data)
+            # save day to netcdf
+            day_mrms.to_netcdf(f'data/mrms/{str(day)}.nc')
             # Sunrise & Sunset
             currenttime = pd.to_datetime(filetime) - timedelta(hours=4)
             currenttime_sup_sunrise = currenttime >=sunrise_mrms['unknown'].data
             currenttime_inf_sunset = currenttime <= sunset_mrms['unknown'].data
+            # load light_mrms
+            light_mrms = xr.open_dataset(f'data/sunshine/{str(day)}.nc')
             if  np.any(currenttime_sup_sunrise) and np.any(currenttime_inf_sunset):
                 light_mrms['unknown'].data[np.logical_and(currenttime_sup_sunrise, currenttime_inf_sunset)] = np.add(np.nan_to_num(clipped['unknown'].data[np.logical_and(currenttime_sup_sunrise, currenttime_inf_sunset)]), light_mrms['unknown'].data[np.logical_and(currenttime_sup_sunrise, currenttime_inf_sunset)])
+            # save step to netcdf
+            light_mrms.to_netcdf(f'data/sunshine/{str(day)}.nc')
+            #clean garbage
+            del xx, clipped, currenttime_sup_sunrise, currenttime_inf_sunset, light_mrms, day_mrms
+            #clean memory
+            gc.collect()
 
     day_mrms.to_netcdf(f'data/daily/{str(day)}.nc')
     light_mrms.to_netcdf(f'data/sunshine/{str(day)}.nc')
+
+
+# import requests
+# from bs4 import BeautifulSoup
+# import urllib.request
+# import tarfile
+# import tempfile
+# import gzip
+# import xarray as xr
+#
+# def listFD(url):
+#     page = requests.get(url).text
+#     soup = BeautifulSoup(page, 'html.parser')
+#     return [url + '/' + node.get('href') for node in soup.find_all('a') if node.get('href').endswith('gz')]
+# url = 'https://mtarchive.geol.iastate.edu/2023/06/16/mrms/ncep/PrecipRate/'
+# target = listFD(url)
+# total = {}
+# target.sort()
+# for thetarfile in tqdm(target):
+#     compressed_file = urllib.request.urlopen(thetarfile).read()
+#     filetime = thetarfile.split('//')[-1].split('_')[-1].split('.')[0]
+#     with tempfile.NamedTemporaryFile(suffix=".grib2") as f:
+#         f.write(gzip.decompress(compressed_file))
+#         xx = xr.load_dataset(f.name, engine='cfgrib')
+#         xx.rio.write_crs("epsg:4326", inplace=True)
+#         total[filetime] = float(xx['unknown'].sel(latitude=40.744423, longitude=360-74.027308, method='nearest').data)
